@@ -62,9 +62,12 @@ from langchain_text_splitters import CharacterTextSplitter  # pyright: ignore[re
 from langchain_community.document_loaders import TextLoader  # pyright: ignore[reportMissingImports]
 
 
-def _fingerprint_txt_sources(data_path: str) -> str:
+SUPPORTED_EXTENSIONS = (".txt", ".md", ".pdf", ".docx")
+
+
+def _fingerprint_sources(data_path: str) -> str:
     """
-    根据知识库目录下所有 .txt 的相对名、文件大小与修改时间生成指纹字符串。
+    根据知识库目录下支持格式文件的相对名、文件大小与修改时间生成指纹字符串。
 
     任意源文件增删改（含内容写入导致 mtime/size 变化）都会使指纹变化，
     从而触发重新切块与向量化；未变化时可直接复用磁盘上的 FAISS 索引。
@@ -73,12 +76,17 @@ def _fingerprint_txt_sources(data_path: str) -> str:
         data_path: 知识库根目录的绝对路径。
 
     返回:
-        用 "|" 拼接的多段描述字符串；目录不存在或无 .txt 时返回空字符串。
+        用 "|" 拼接的多段描述字符串；目录不存在或无支持文件时返回空字符串。
     """
     if not os.path.isdir(data_path):
         return ""
     parts: list[str] = []
-    for name in sorted(f for f in os.listdir(data_path) if f.endswith(".txt")):
+    for name in sorted(
+        f
+        for f in os.listdir(data_path)
+        if os.path.isfile(os.path.join(data_path, f))
+        and f.lower().endswith(SUPPORTED_EXTENSIONS)
+    ):
         full = os.path.join(data_path, name)
         try:
             st = os.stat(full)
@@ -137,21 +145,51 @@ def _faiss_artifacts_present(index_dir: str) -> bool:
     )
 
 
-def _load_txt_documents(data_path: str) -> list:
+def _build_loader(file_path: str):
     """
-    从目录中加载所有 .txt 为 LangChain Document 列表。
+    根据文件后缀构建对应的 LangChain Loader。
+    """
+    suffix = os.path.splitext(file_path)[1].lower()
+    if suffix == ".txt":
+        return TextLoader(file_path, encoding="utf-8")
+    if suffix == ".md":
+        from langchain_community.document_loaders import (
+            UnstructuredMarkdownLoader,  # pyright: ignore[reportMissingImports]
+        )
+
+        return UnstructuredMarkdownLoader(file_path)
+    if suffix == ".pdf":
+        from langchain_community.document_loaders import (
+            PyPDFLoader,  # pyright: ignore[reportMissingImports]
+        )
+
+        return PyPDFLoader(file_path)
+    if suffix == ".docx":
+        from langchain_community.document_loaders import (
+            Docx2txtLoader,  # pyright: ignore[reportMissingImports]
+        )
+
+        return Docx2txtLoader(file_path)
+    raise ValueError(f"不支持的文件格式: {suffix}")
+
+
+def _load_documents(data_path: str) -> list:
+    """
+    从目录中加载所有支持格式文件为 LangChain Document 列表。
 
     参数:
         data_path: 知识库根目录。
 
     返回:
-        由 TextLoader 合并得到的文档列表；无匹配文件时为空列表。
+        由各类 Loader 合并得到的文档列表；无匹配文件时为空列表。
     """
     documents: list = []
-    for file in os.listdir(data_path):
-        if file.endswith(".txt"):
-            loader = TextLoader(os.path.join(data_path, file), encoding="utf-8")
-            documents.extend(loader.load())
+    for file in sorted(os.listdir(data_path)):
+        full = os.path.join(data_path, file)
+        if not os.path.isfile(full) or not file.lower().endswith(SUPPORTED_EXTENSIONS):
+            continue
+        loader = _build_loader(full)
+        documents.extend(loader.load())
     return documents
 
 
@@ -194,7 +232,7 @@ def _split_documents(
 
 class RAG:
     """
-    基于本地 txt + FAISS 的简单检索：首次构建向量索引并落盘，之后优先从磁盘加载。
+    基于本地文档 + FAISS 的简单检索：首次构建向量索引并落盘，之后优先从磁盘加载。
     """
 
     def __init__(self, data_path: str = "docs") -> None:
@@ -202,7 +240,7 @@ class RAG:
         初始化 RAG：优先加载缓存索引；指纹或文件缺失时重新加载文档、切块、向量化并保存。
 
         参数:
-            data_path: 存放 .txt 知识文件的目录，相对路径则相对于进程当前工作目录。
+            data_path: 存放知识文件的目录（支持 txt/md/pdf/docx），相对路径则相对于进程当前工作目录。
         """
         self.data_path = os.path.abspath(data_path)
         # 索引与知识库同级，避免把向量文件混进 docs 里
@@ -226,7 +264,7 @@ class RAG:
         except ValueError:
             chunk_overlap = 50
         chunk_overlap = max(0, min(chunk_overlap, max(0, chunk_size - 32)))
-        source_fp = _fingerprint_txt_sources(self.data_path)
+        source_fp = _fingerprint_sources(self.data_path)
         emb_fp = hashlib.sha256(emb_name.encode("utf-8")).hexdigest()[:24]
         # 切块参数与嵌入模型均参与缓存键，避免换模型或换 chunk 仍误用旧索引
         cache_key = f"{source_fp}||split:{chunk_size}:{chunk_overlap}||emb:{emb_fp}"
@@ -268,12 +306,13 @@ class RAG:
             return
 
         print("RAG：未命中缓存或源文件已变更，正在重新构建索引...")
-        documents = _load_txt_documents(self.data_path)
+        documents = _load_documents(self.data_path)
         docs = _split_documents(documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
         if not docs:
             raise ValueError(
-                f"知识库目录中没有可用的 .txt 文件，无法构建向量索引: {self.data_path}"
+                "知识库目录中没有可用文件，支持格式为 txt/md/pdf/docx，"
+                f"无法构建向量索引: {self.data_path}"
             )
 
         self.vectorstore = FAISS.from_documents(docs, self.embedding)

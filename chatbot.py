@@ -42,6 +42,10 @@ class ChatBot:
             SystemMessage(content=self.build_system_prompt()),
         ]
 
+    def clear_history(self) -> None:
+        """清空多轮对话，仅保留 system prompt（用于网页端「新对话」）。"""
+        self.messages = [SystemMessage(content=self.build_system_prompt())]
+
     def build_system_prompt(self) -> str:
         lines = [
             "你是「原神深渊与养成」方向的助手，语气清晰、友好，回答尽量结构化（可分点、小标题），避免无根据的臆测。",

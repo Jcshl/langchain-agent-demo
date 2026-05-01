@@ -1,0 +1,4 @@
+# 本地开发：关闭文件监视，避免 Streamlit 遍历 transformers 等依赖时刷大量无害报错。
+# 修改代码后需手动刷新浏览器页面。
+[server]
+fileWatcherType = "none"
