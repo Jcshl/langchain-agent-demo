@@ -62,6 +62,7 @@ from langchain_text_splitters import CharacterTextSplitter  # pyright: ignore[re
 from langchain_community.document_loaders import TextLoader  # pyright: ignore[reportMissingImports]
 
 
+# 可参与知识库索引的文件后缀。
 SUPPORTED_EXTENSIONS = (".txt", ".md", ".pdf", ".docx")
 
 
@@ -80,6 +81,7 @@ def _fingerprint_sources(data_path: str) -> str:
     """
     if not os.path.isdir(data_path):
         return ""
+    # parts：每个源文件的“文件名:大小:mtime”描述，最终拼成缓存指纹。
     parts: list[str] = []
     for name in sorted(
         f
@@ -149,6 +151,7 @@ def _build_loader(file_path: str):
     """
     根据文件后缀构建对应的 LangChain Loader。
     """
+    # suffix：文件扩展名（小写），用于分派不同 Loader。
     suffix = os.path.splitext(file_path)[1].lower()
     if suffix == ".txt":
         return TextLoader(file_path, encoding="utf-8")
@@ -183,6 +186,7 @@ def _load_documents(data_path: str) -> list:
     返回:
         由各类 Loader 合并得到的文档列表；无匹配文件时为空列表。
     """
+    # documents：汇总后的 LangChain Document 列表。
     documents: list = []
     for file in sorted(os.listdir(data_path)):
         full = os.path.join(data_path, file)
@@ -242,10 +246,12 @@ class RAG:
         参数:
             data_path: 存放知识文件的目录（支持 txt/md/pdf/docx），相对路径则相对于进程当前工作目录。
         """
+        # data_path 的绝对路径，指向原始知识文件目录。
         self.data_path = os.path.abspath(data_path)
         # 索引与知识库同级，避免把向量文件混进 docs 里
         self.index_dir = os.path.join(os.path.dirname(self.data_path), ".rag_faiss_index")
 
+        # emb_name：嵌入模型 ID 或本地目录路径。
         emb_name = _resolve_embedding_model_name()
         raw_emb_path = (os.getenv("RAG_EMBEDDING_MODEL_PATH") or "").strip().strip('"')
         if raw_emb_path and emb_name == "sentence-transformers/all-MiniLM-L6-v2":
@@ -264,12 +270,14 @@ class RAG:
         except ValueError:
             chunk_overlap = 50
         chunk_overlap = max(0, min(chunk_overlap, max(0, chunk_size - 32)))
+        # source_fp：源文档指纹；emb_fp：嵌入模型指纹。
         source_fp = _fingerprint_sources(self.data_path)
         emb_fp = hashlib.sha256(emb_name.encode("utf-8")).hexdigest()[:24]
         # 切块参数与嵌入模型均参与缓存键，避免换模型或换 chunk 仍误用旧索引
         cache_key = f"{source_fp}||split:{chunk_size}:{chunk_overlap}||emb:{emb_fp}"
 
         # 1️⃣ 加载 embedding 模型（加载索引时也需要同一套 embeddings）
+        # hub_ep：当前 HuggingFace Hub 端点（官方或镜像）。
         hub_ep = (os.environ.get("HF_ENDPOINT") or "").strip()
         print(
             "RAG：HuggingFace Hub 端点 = "
@@ -289,6 +297,7 @@ class RAG:
                 "（首次下载可能较慢、终端可能长时间无新输出）",
             )
             self.embedding = HuggingFaceEmbeddings(model_name=emb_name)
+        # cached_fp：上次构建索引时记录的缓存键。
         cached_fp = _read_cached_fingerprint(self.index_dir)
 
         if (
@@ -306,6 +315,7 @@ class RAG:
             return
 
         print("RAG：未命中缓存或源文件已变更，正在重新构建索引...")
+        # documents：原始文档；docs：切块后的文档单元（用于向量化）。
         documents = _load_documents(self.data_path)
         docs = _split_documents(documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
@@ -319,6 +329,7 @@ class RAG:
         os.makedirs(self.index_dir, exist_ok=True)
         self.vectorstore.save_local(self.index_dir)
         _write_fingerprint(self.index_dir, cache_key)
+        # split_meta.json：记录切块参数与嵌入模型，便于排障。
         meta_path = os.path.join(self.index_dir, "split_meta.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -349,5 +360,6 @@ class RAG:
             except ValueError:
                 k = 8
             k = max(1, min(k, 50))
+        # results：相似度召回得到的 Document 列表（按相似度排序）。
         results = self.vectorstore.similarity_search(query, k=k)
         return "\n".join(doc.page_content for doc in results)

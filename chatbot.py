@@ -20,8 +20,18 @@ class ChatBot:
     """
 
     def __init__(self, model_name: str, api_key: str):
+        """
+        初始化对话机器人与工具绑定。
+
+        参数:
+            model_name: 大模型名称（从 .env 的 MODEL_NAME 读取后传入）。
+            api_key: 模型服务 API Key（从 .env 的 SILICONFLOW_API_KEY 读取后传入）。
+        """
+        # LLM 调用超时（秒），默认 120，可被环境变量覆盖。
         _timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
+        # LLM 网络重试次数，默认 2。
         _retries = int(os.getenv("LLM_MAX_RETRIES", "2"))
+        # 基础模型客户端（不含工具执行逻辑）。
         self.llm = ChatOpenAI(
             model=model_name,
             openai_api_key=api_key,
@@ -30,14 +40,18 @@ class ChatBot:
             request_timeout=_timeout,
             max_retries=_retries,
         )
+        # 绑定工具后的模型客户端：可返回 tool_calls。
         self.llm_tools = self.llm.bind_tools(lc_tools)
+        # 按工具名建立索引，便于根据模型返回的 name 快速调用工具。
         self._tool_by_name = {t.name: t for t in lc_tools}
         try:
+            # Agent 工具循环最大步数，避免无限循环。
             self._max_agent_steps = int((os.getenv("AGENT_MAX_ITERATIONS") or "12").strip())
         except ValueError:
             self._max_agent_steps = 12
         self._max_agent_steps = max(1, min(self._max_agent_steps, 50))
 
+        # 多轮对话历史；首条固定为系统提示词。
         self.messages: list = [
             SystemMessage(content=self.build_system_prompt()),
         ]
@@ -47,6 +61,7 @@ class ChatBot:
         self.messages = [SystemMessage(content=self.build_system_prompt())]
 
     def build_system_prompt(self) -> str:
+        """构造系统提示词，并动态附加当前可用工具说明。"""
         lines = [
             "你是「原神深渊与养成」方向的助手，语气清晰、友好，回答尽量结构化（可分点、小标题），避免无根据的臆测。",
             "",
@@ -69,6 +84,13 @@ class ChatBot:
             self.messages = [self.messages[0]] + self.messages[-max_len + 1 :]
 
     def _invoke_tool(self, name: str, args: dict[str, Any]) -> str:
+        """
+        按工具名执行一次工具调用并返回文本结果。
+
+        参数:
+            name: 工具名称（由模型 tool_calls 提供）。
+            args: 工具参数字典。
+        """
         print(f"[Tool调用] {name} 参数: {args}")
         tool = self._tool_by_name.get(name)
         if tool is None:
@@ -82,10 +104,12 @@ class ChatBot:
 
     def _run_tool_loop(self) -> str:
         """在已有 self.messages 末尾为用户轮次的前提下，多轮 tool 直至无 tool_calls 或达上限。"""
+        # 当前轮已执行的模型步骤数（每次 llm_tools.invoke 算一步）。
         steps = 0
         while steps < self._max_agent_steps:
             steps += 1
             print(f"[LLM] 正在请求模型（第 {steps} 步）...")
+            # response 可能是普通文本回复，也可能包含 tool_calls。
             response = self.llm_tools.invoke(self.messages)
             print("[LLM] 响应完成")
 
@@ -93,6 +117,7 @@ class ChatBot:
                 self.messages.append(response)
                 return getattr(response, "content", "") or ""
 
+            # 从 AIMessage 中提取工具调用列表；无工具调用时为空列表。
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
                 self.messages.append(response)
@@ -102,14 +127,18 @@ class ChatBot:
 
             for tc in tool_calls:
                 if isinstance(tc, dict):
+                    # 工具调用唯一 ID：用于把 ToolMessage 回填给对应调用。
                     tid = tc.get("id") or ""
+                    # 工具名称，例如 rag_search / calculator。
                     name = tc.get("name") or ""
+                    # 工具参数字典。
                     args = tc.get("args") or {}
                 else:
                     tid = getattr(tc, "id", "") or ""
                     name = getattr(tc, "name", "") or ""
                     args = getattr(tc, "args", None) or {}
 
+                # 执行工具并把结果以 ToolMessage 形式回填到上下文。
                 payload = self._invoke_tool(name, args)
                 self.messages.append(ToolMessage(content=payload, tool_call_id=tid))
 
@@ -122,11 +151,19 @@ class ChatBot:
                 content="工具调用次数已达上限。请仅根据已有对话与工具返回，直接给出最终中文回答，不要再调用任何工具。"
             )
         )
+        # 达到上限后改用不带工具的 llm 强制收束答案。
         final = self.llm.invoke(self.messages)
         self.messages.append(final)
         return (final.content or "").strip()
 
     def chat(self, user_input: str) -> str:
+        """
+        对外主入口：接收用户输入并返回最终回复文本。
+
+        参数:
+            user_input: 用户本轮输入内容。
+        """
+        # 把用户输入写入历史，供模型读取上下文。
         self.messages.append(HumanMessage(content=user_input))
         self.trim_messages()
 
