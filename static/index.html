@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>原神深渊与养成助手</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7fb;
+      --card: #fff;
+      --border: #e2e5ec;
+      --text: #1a1d26;
+      --muted: #5c647a;
+      --accent: #2563eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #12141a;
+        --card: #1c1f28;
+        --border: #2a2f3d;
+        --text: #e8eaef;
+        --muted: #9aa3b8;
+        --accent: #60a5fa;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--card);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    h1 { font-size: 1.125rem; margin: 0; font-weight: 600; }
+    .actions { display: flex; gap: 0.5rem; align-items: center; }
+    button {
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      padding: 0.45rem 0.85rem;
+      border-radius: 8px;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: transparent;
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .bubble {
+      max-width: 92%;
+      padding: 0.65rem 0.9rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+      font-size: 0.95rem;
+    }
+    .bubble.user { align-self: flex-end; background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+    .bubble.assistant { align-self: flex-start; }
+    .bubble .role { font-size: 0.7rem; color: var(--muted); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    footer {
+      padding: 0.75rem 1rem 1.25rem;
+      border-top: 1px solid var(--border);
+      background: var(--card);
+    }
+    .composer {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+    }
+    textarea {
+      flex: 1;
+      min-height: 2.75rem;
+      max-height: 8rem;
+      resize: vertical;
+      font: inherit;
+      padding: 0.55rem 0.75rem;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+    }
+    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; max-width: 720px; margin-left: auto; margin-right: auto; padding: 0 0.25rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>原神深渊与养成助手</h1>
+    <div class="actions">
+      <button type="button" id="btnNew">新对话</button>
+    </div>
+  </header>
+  <div id="log" aria-live="polite"></div>
+  <footer>
+    <div class="composer">
+      <textarea id="input" rows="2" placeholder="输入你的问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button type="button" class="primary" id="btnSend">发送</button>
+    </div>
+    <p class="hint">会话保存在本机浏览器；服务端按 session 保留多轮上下文（进程重启后需重新对话）。</p>
+  </footer>
+  <script>
+    const STORAGE_KEY = "langchain-agent-demo-session";
+    const logEl = document.getElementById("log");
+    const inputEl = document.getElementById("input");
+    const btnSend = document.getElementById("btnSend");
+    const btnNew = document.getElementById("btnNew");
+
+    function getSessionId() {
+      let id = localStorage.getItem(STORAGE_KEY);
+      if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem(STORAGE_KEY, id);
+      }
+      return id;
+    }
+
+    function setSessionId(id) {
+      localStorage.setItem(STORAGE_KEY, id);
+    }
+
+    function clearSessionId() {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+
+    function appendBubble(role, text) {
+      const div = document.createElement("div");
+      div.className = "bubble " + (role === "user" ? "user" : "assistant");
+      const r = document.createElement("div");
+      r.className = "role";
+      r.textContent = role === "user" ? "你" : "助手";
+      div.appendChild(r);
+      const t = document.createElement("div");
+      t.textContent = text;
+      div.appendChild(t);
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function send() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      inputEl.value = "";
+      appendBubble("user", text);
+      btnSend.disabled = true;
+      try {
+        const sid = getSessionId();
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, session_id: sid }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const msg = data.detail || data.message || res.statusText || "请求失败";
+          appendBubble("assistant", typeof msg === "string" ? msg : JSON.stringify(msg));
+          return;
+        }
+        if (data.session_id) setSessionId(data.session_id);
+        appendBubble("assistant", data.reply || "");
+      } catch (e) {
+        appendBubble("assistant", "网络错误：" + (e && e.message ? e.message : String(e)));
+      } finally {
+        btnSend.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    async function newChat() {
+      const sid = localStorage.getItem(STORAGE_KEY);
+      if (sid) {
+        try {
+          await fetch("/api/chat/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sid }),
+          });
+        } catch (_) { /* ignore */ }
+      }
+      clearSessionId();
+      logEl.innerHTML = "";
+      inputEl.focus();
+    }
+
+    btnSend.addEventListener("click", send);
+    btnNew.addEventListener("click", newChat);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+  </script>
+</body>
+</html>
